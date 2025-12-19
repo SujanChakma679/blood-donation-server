@@ -40,16 +40,20 @@ async function run() {
 
     const db = client.db("blood_donation_DB");
     const usersCollection = db.collection("users");
+    const donationRequestsCollection = db.collection("donationRequests");
+
 
     app.post('/users', async(req, res) =>{
       const userInfo = req.body;
       
-      // userInfo.role = 'donor'; // we can set role default from the backed also
+      userInfo.role = 'donor'; // we can set role default from the backed also
+      userInfo.status = 'active';
       userInfo.createdAt = new Date();
       const result = await usersCollection.insertOne(userInfo);
       res.send(result)
     })
 
+    // user role api
     app.get('/users/role/:email', async(req, res) =>{
       const {email} = req.params
       const query = { email: email }
@@ -57,6 +61,47 @@ async function run() {
       console.log(result)
       res.send(result)
     })
+
+    // donation request api
+    app.post("/donation-requests", async (req, res) => {
+  const donationRequest = req.body;
+
+  donationRequest.createdAt = new Date();
+  donationRequest.donationStatus = "pending";
+
+  const result = await donationRequestsCollection.insertOne(donationRequest);
+  res.send(result);
+});
+
+app.get("/donation-requests", async (req, res) => {
+  const email = req.query.email;
+
+  if (!email) {
+    return res.status(400).send({ message: "Email is required" });
+  }
+
+  const query = { requesterEmail: email };
+  const result = await donationRequestsCollection
+    .find(query)
+    .sort({ createdAt: -1 }) // newest first
+    .toArray();
+
+  res.send(result);
+});
+
+
+// app.get("/donation-requests/recent", async (req, res) => {
+//   const email = req.query.email;
+
+//   const result = await donationRequestsCollection
+//     .find({ requesterEmail: email })
+//     .sort({ createdAt: -1 })
+//     .limit(3)
+//     .toArray();
+
+//   res.send(result);
+// });
+
 
 
 
