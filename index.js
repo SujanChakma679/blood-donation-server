@@ -90,17 +90,31 @@ app.get("/donation-requests", async (req, res) => {
 });
 
 
-// app.get("/donation-requests/recent", async (req, res) => {
-//   const email = req.query.email;
+app.get("/admin-stats", async (req, res) => {
+  try {
+    // total users (donors)
+    const totalUsers = await usersCollection.countDocuments({
+      role: "donor",
+    });
 
-//   const result = await donationRequestsCollection
-//     .find({ requesterEmail: email })
-//     .sort({ createdAt: -1 })
-//     .limit(3)
-//     .toArray();
+    // total donation requests
+    const totalRequests = await donationRequestsCollection.countDocuments();
 
-//   res.send(result);
-// });
+    // total funding (temporary – set 0 if no funding feature yet)
+    const totalFunds = 0;
+
+    res.send({
+      totalUsers,
+      totalRequests,
+      totalFunds,
+    });
+  } catch (error) {
+    console.error("Admin stats error:", error);
+    res.status(500).send({ message: "Failed to load admin stats" });
+  }
+});
+
+
 
 
 
