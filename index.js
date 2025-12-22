@@ -103,7 +103,8 @@ async function run() {
       res.send(result);
     });
 
-    // Payment Gateway
+    //--------------- Payment Gateway-----------------
+
     app.post("/create-payment", async (req, res) => {
       try {
         const { donationAmount, name, email } = req.body;
@@ -193,6 +194,68 @@ async function run() {
         res.status(500).json({ message: "Internal server error" });
       }
     });
+
+    // all financial donation data
+   app.get("/donations", async (req, res) => {
+  try {
+    const { email } = req.query;
+
+    if (!email) {
+      return res.status(401).json({ message: "Unauthorized" });
+    }
+
+    // 🔐 Get user role from DB
+    const user = await usersCollection.findOne({ email });
+
+    // ✅ Admin → full access
+    if (user?.role === "admin") {
+      const donations = await donationsCollection
+        .find()
+        .sort({ createdAt: -1 })
+        .toArray();
+      return res.json(donations);
+    }
+
+    // 🔍 Financial donor check
+    const hasDonated = await donationsCollection.findOne({ email });
+
+    if (!hasDonated) {
+      return res.status(403).json({
+        message: "You have not made any financial donation",
+      });
+    }
+
+    // ✅ Financial donor → see all
+    const donations = await donationsCollection
+      .find()
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    res.json(donations);
+
+  } catch (error) {
+    console.error("Donations fetch error:", error);
+    res.status(500).json({ message: "Internal server error" });
+  }
+});
+
+
+app.get("/donations-access", async (req, res) => {
+  const { email } = req.query;
+
+  if (!email) return res.json({ allowed: false });
+
+  const user = await usersCollection.findOne({ email });
+
+  if (user?.role === "admin") {
+    return res.json({ allowed: true });
+  }
+
+  const hasDonated = await donationsCollection.findOne({ email });
+
+  res.json({ allowed: !!hasDonated });
+});
+
 
     /* ================= DONATION REQUESTS ================= */
 
@@ -486,7 +549,6 @@ async function run() {
 }
 
 run();
-
 
 
 /* ================= ROOT ================= */
