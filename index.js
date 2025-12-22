@@ -1,7 +1,3 @@
-
-
-
-
 const express = require("express");
 const cors = require("cors");
 require("dotenv").config();
@@ -10,6 +6,9 @@ const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
 
 const app = express();
 const port = process.env.PORT || 3000;
+
+const stripe = require("stripe")(process.env.STRIPE_PAYMENT_GATEWAY);
+const crypto = require("crypto");
 
 /* ================= MIDDLEWARE ================= */
 app.use(cors());
@@ -34,6 +33,7 @@ async function run() {
     const db = client.db("blood_donation_DB");
     const usersCollection = db.collection("users");
     const donationRequestsCollection = db.collection("donationRequests");
+    const donationsCollection = db.collection("donor");
 
     /* ================= USERS ================= */
 
@@ -103,6 +103,97 @@ async function run() {
       res.send(result);
     });
 
+    // Payment Gateway
+    app.post("/create-payment", async (req, res) => {
+      try {
+        const { donationAmount, name, email } = req.body;
+
+        if (typeof donationAmount !== "number" || donationAmount <= 0) {
+          return res.status(400).json({
+            success: false,
+            message: "Invalid donation amount",
+          });
+        }
+
+        const amountInCents = donationAmount * 100;
+
+        const session = await stripe.checkout.sessions.create({
+          payment_method_types: ["card"],
+          mode: "payment",
+          line_items: [
+            {
+              price_data: {
+                currency: "usd",
+                unit_amount: amountInCents,
+                product_data: {
+                  name: "Blood Donation Support",
+                },
+              },
+              quantity: 1,
+            },
+          ],
+          customer_email: email,
+          metadata: {
+            donorName: name,
+          },
+          success_url: `${process.env.SITE_DOMAIN}/payment-success?session_id={CHECKOUT_SESSION_ID}`,
+          cancel_url: `${process.env.SITE_DOMAIN}/payment-cancel`,
+        });
+
+        res.status(200).json({
+          success: true,
+          url: session.url,
+        });
+      } catch (error) {
+        console.error("Stripe Error:", error);
+        res.status(500).json({
+          success: false,
+          message: "Internal Server Error",
+        });
+      }
+    });
+
+    app.post("/confirm-payment", async (req, res) => {
+      try {
+        const { sessionId } = req.body;
+
+        if (!sessionId) {
+          return res.status(400).json({ message: "Session ID missing" });
+        }
+
+        // 1️⃣ Retrieve session from Stripe
+        const session = await stripe.checkout.sessions.retrieve(sessionId);
+
+        // 2️⃣ Check payment status
+        if (session.payment_status !== "paid") {
+          return res.status(400).json({ message: "Payment not completed" });
+        }
+
+        // 3️⃣ Prepare donation data
+        const donation = {
+          name: session.metadata?.donorName || "Anonymous",
+          email: session.customer_email,
+          amount: session.amount_total / 100,
+          currency: session.currency,
+          transactionId: session.payment_intent,
+          sessionId: session.id,
+          createdAt: new Date(),
+        };
+
+        // 4️⃣ Save to database (MongoDB example)
+        const result = await donationsCollection.insertOne(donation);
+
+        res.status(200).json({
+          success: true,
+          message: "Donation saved successfully",
+          donationId: result.insertedId,
+        });
+      } catch (error) {
+        console.error("Confirm payment error:", error);
+        res.status(500).json({ message: "Internal server error" });
+      }
+    });
+
     /* ================= DONATION REQUESTS ================= */
 
     // PUBLIC: Get all pending donation requests
@@ -159,6 +250,16 @@ async function run() {
       res.send(result);
     });
 
+    // ADMIN: Get all donation requests
+    app.get("/donation-requests/all", async (req, res) => {
+      const result = await donationRequestsCollection
+        .find({})
+        .sort({ createdAt: -1 })
+        .toArray();
+
+      res.send(result);
+    });
+
     // Get single donation request (private)
     app.get("/donation-requests/:id", async (req, res) => {
       const { id } = req.params;
@@ -176,6 +277,47 @@ async function run() {
       }
 
       res.send(request);
+    });
+
+    // change the status
+    app.patch("/donation-requests/:id/status", async (req, res) => {
+      const { id } = req.params;
+      const { status, email, role } = req.body;
+
+      if (!["done", "canceled"].includes(status)) {
+        return res.status(400).send({ message: "Invalid status" });
+      }
+
+      const request = await donationRequestsCollection.findOne({
+        _id: new ObjectId(id),
+      });
+
+      if (!request) {
+        return res.status(404).send({ message: "Not found" });
+      }
+
+      // ✅ ADMIN OVERRIDE
+      if (role !== "admin") {
+        if (request.donationStatus !== "inprogress") {
+          return res.status(400).send({ message: "Status change not allowed" });
+        }
+
+        if (request.donorEmail !== email) {
+          return res.status(403).send({ message: "Not allowed" });
+        }
+      }
+
+      await donationRequestsCollection.updateOne(
+        { _id: new ObjectId(id) },
+        {
+          $set: {
+            donationStatus: status,
+            completedAt: new Date(),
+          },
+        }
+      );
+
+      res.send({ success: true });
     });
 
     // DELETE donation request (only pending + owner)
@@ -228,9 +370,7 @@ async function run() {
       }
 
       if (user.status === "blocked") {
-        return res
-          .status(403)
-          .send({ message: "Blocked users cannot donate" });
+        return res.status(403).send({ message: "Blocked users cannot donate" });
       }
 
       const result = await donationRequestsCollection.updateOne(
@@ -248,9 +388,7 @@ async function run() {
       );
 
       if (result.modifiedCount === 0) {
-        return res
-          .status(400)
-          .send({ message: "Donation already taken" });
+        return res.status(400).send({ message: "Donation already taken" });
       }
 
       res.send(result);
@@ -274,9 +412,7 @@ async function run() {
       }
 
       if (request.donationStatus !== "inprogress") {
-        return res
-          .status(400)
-          .send({ message: "Status change not allowed" });
+        return res.status(400).send({ message: "Status change not allowed" });
       }
 
       if (request.donorEmail !== email) {
@@ -296,26 +432,24 @@ async function run() {
       res.send({ success: true });
     });
 
-
     // SEARCH DONORS (PUBLIC)
-app.get("/users/search", async (req, res) => {
-  const { bloodGroup, district, upazila } = req.query;
+    app.get("/users/search", async (req, res) => {
+      const { bloodGroup, district, upazila } = req.query;
 
-  // Build dynamic query
-  const query = {
-    role: "donor",
-    status: "active",
-  };
+      // Build dynamic query
+      const query = {
+        role: "donor",
+        status: "active",
+      };
 
-  if (bloodGroup) query.bloodGroup = bloodGroup;
-  if (district) query.district = district;
-  if (upazila) query.upazila = upazila;
+      if (bloodGroup) query.bloodGroup = bloodGroup;
+      if (district) query.district = district;
+      if (upazila) query.upazila = upazila;
 
-  const donors = await usersCollection.find(query).toArray();
+      const donors = await usersCollection.find(query).toArray();
 
-  res.send(donors);
-});
-
+      res.send(donors);
+    });
 
     /* ================= ADMIN STATS ================= */
 
@@ -324,13 +458,26 @@ app.get("/users/search", async (req, res) => {
         role: "donor",
       });
 
-      const totalRequests =
-        await donationRequestsCollection.countDocuments();
+      const totalRequests = await donationRequestsCollection.countDocuments();
+
+      // 🔥 Calculate total funds
+      const fundsResult = await donationsCollection
+        .aggregate([
+          {
+            $group: {
+              _id: null,
+              totalFunds: { $sum: "$amount" },
+            },
+          },
+        ])
+        .toArray();
+
+      const totalFunds = fundsResult[0]?.totalFunds || 0;
 
       res.send({
         totalUsers,
         totalRequests,
-        totalFunds: 0,
+        totalFunds,
       });
     });
   } catch (error) {
@@ -339,6 +486,8 @@ app.get("/users/search", async (req, res) => {
 }
 
 run();
+
+
 
 /* ================= ROOT ================= */
 app.get("/", (req, res) => {
